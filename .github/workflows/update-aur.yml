@@ -1,0 +1,148 @@
+name: Update AUR Package
+
+on:
+  schedule:
+    # 每天 UTC 00:00 檢查 (台灣時間 08:00)
+    - cron: '0 0 * * *'
+  workflow_dispatch:  # 允許手動觸發
+
+env:
+  UPSTREAM_REPO: chen08209/FlClash
+  AUR_PACKAGE: flclash-appimage-bin
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Get latest upstream version
+        id: upstream
+        run: |
+          LATEST=$(curl -s "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/latest" | jq -r '.tag_name' | sed 's/^v//')
+          echo "version=$LATEST" >> $GITHUB_OUTPUT
+          echo "Latest upstream version: $LATEST"
+
+      - name: Get current AUR version
+        id: current
+        run: |
+          CURRENT=$(grep '^pkgver=' PKGBUILD | cut -d= -f2)
+          echo "version=$CURRENT" >> $GITHUB_OUTPUT
+          echo "Current AUR version: $CURRENT"
+
+      - name: Check if update needed
+        id: check
+        run: |
+          if [ "${{ steps.upstream.outputs.version }}" != "${{ steps.current.outputs.version }}" ]; then
+            echo "needs_update=true" >> $GITHUB_OUTPUT
+            echo "Update needed: ${{ steps.current.outputs.version }} -> ${{ steps.upstream.outputs.version }}"
+          else
+            echo "needs_update=false" >> $GITHUB_OUTPUT
+            echo "Already up to date"
+          fi
+
+      - name: Update PKGBUILD
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          NEW_VERSION="${{ steps.upstream.outputs.version }}"
+
+          # Update pkgver
+          sed -i "s/^pkgver=.*/pkgver=$NEW_VERSION/" PKGBUILD
+
+          # Reset pkgrel to 1
+          sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+
+          # Download new AppImage and calculate sha256sum
+          APPIMAGE_URL="https://github.com/${{ env.UPSTREAM_REPO }}/releases/download/v${NEW_VERSION}/FlClash-${NEW_VERSION}-linux-amd64.AppImage"
+          echo "Downloading: $APPIMAGE_URL"
+          curl -L -o FlClash.AppImage "$APPIMAGE_URL"
+
+          NEW_SHA256=$(sha256sum FlClash.AppImage | cut -d' ' -f1)
+          echo "New SHA256: $NEW_SHA256"
+
+          # Update sha256sum in PKGBUILD
+          sed -i "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('$NEW_SHA256')/" PKGBUILD
+
+          rm FlClash.AppImage
+
+          echo "PKGBUILD updated to version $NEW_VERSION"
+
+      - name: Generate .SRCINFO
+        if: steps.check.outputs.needs_update == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install makepkg-like tool
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          # Generate .SRCINFO manually (simplified version)
+          source PKGBUILD
+          cat > .SRCINFO << EOF
+          pkgbase = $pkgname
+          	pkgdesc = $pkgdesc
+          	pkgver = $pkgver
+          	pkgrel = $pkgrel
+          	url = $url
+          	arch = x86_64
+          	license = GPL-3.0-only
+          	depends = gtk3
+          	depends = libayatana-appindicator
+          	depends = libkeybinder3
+          	depends = hicolor-icon-theme
+          	provides = flclash
+          	conflicts = flclash
+          	conflicts = flclash-bin
+          	options = !strip
+          	source_x86_64 = FlClash-${pkgver}.AppImage::https://github.com/chen08209/FlClash/releases/download/v${pkgver}/FlClash-${pkgver}-linux-amd64.AppImage
+          	sha256sums_x86_64 = ${sha256sums_x86_64[0]}
+
+          pkgname = $pkgname
+          EOF
+
+      - name: Commit changes to this repo
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to ${{ steps.upstream.outputs.version }}"
+          git push
+
+      - name: Push to AUR
+        if: steps.check.outputs.needs_update == 'true'
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          # Setup SSH
+          mkdir -p ~/.ssh
+          echo "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+
+          cat >> ~/.ssh/config << EOF
+          Host aur.archlinux.org
+            IdentityFile ~/.ssh/aur
+            User aur
+            StrictHostKeyChecking accept-new
+          EOF
+
+          # Clone AUR repo and push
+          git clone ssh://aur@aur.archlinux.org/${{ env.AUR_PACKAGE }}.git aur-repo
+          cp PKGBUILD .SRCINFO aur-repo/
+          cd aur-repo
+          git config user.name "comalot"
+          git config user.email "joegodwanggod@gmail.com"
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to ${{ steps.upstream.outputs.version }}"
+          git push
+
+      - name: Create summary
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          echo "## AUR Package Updated!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Package:** ${{ env.AUR_PACKAGE }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Old version:** ${{ steps.current.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **New version:** ${{ steps.upstream.outputs.version }}" >> $GITHUB_STEP_SUMMARY
