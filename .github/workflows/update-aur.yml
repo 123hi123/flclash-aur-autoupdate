@@ -1,6 +1,8 @@
 name: Update AUR Package
 
 on:
+  push:
+    branches: [master]  # 推送時觸發 (用於首次啟用)
   schedule:
     # 每天 UTC 00:00 檢查 (台灣時間 08:00)
     - cron: '0 0 * * *'
