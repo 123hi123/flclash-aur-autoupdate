@@ -51,3 +51,4 @@ GitHub repo → Actions → Update AUR Package → Run workflow
 ## 授權
 
 GPL-3.0
+
